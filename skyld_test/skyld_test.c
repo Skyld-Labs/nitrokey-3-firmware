@@ -337,8 +337,8 @@ int main(int argc, char *argv[]) {
     init_NK3();
     provide_NK3();
 
-    //load_KN3();
-    //deriveSessionKey_NK3();
+    load_KN3();
+    deriveSessionKey_NK3();
 
     clear_NK3();
 

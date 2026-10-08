@@ -19,10 +19,15 @@ use trussed_core::FilesystemClient;
 
 const AES_GCM_NONCE_LEN: usize = 12;
 const AES_GCM_TAG_LEN: usize = 16;
+const AES_256_SIZE: usize = 32;
 const SHA256_LEN: usize = 32;
 
 const MAX_KEYS: usize = 8;
 const MAX_KEY_LEN: usize = 10240; // 10Ko
+
+const COMMAND_WRAP: u8 = 0x01;
+const COMMAND_UNWRAP: u8 = 0x02;
+const COMMAND_DERIVE: u8 = 0x03;
 
 const F32_SIZE: usize = size_of::<f32>();
 const F16_SIZE: usize = size_of::<half::f16>();
@@ -46,7 +51,7 @@ pub struct SkyldApp<C> {
 }
 
 impl<C> SkyldApp<C> {
-    // RID propriétaire 'F0' (see Table 90 in the ISO) suivi de l'identifiant "Skyld"
+    // RID propriétaire 'F0' (see Table 90 in the ISO) followed by "Skyld"
     const AID: Aid = Aid::new(&[0xF0, 0x53, 0x6B, 0x79, 0x6C, 0x64]);
 
     pub fn new(trussed: C) -> Self {
@@ -58,12 +63,13 @@ impl<C> SkyldApp<C> {
     }
 }
 
-// La logique de dérivation est ici
+// Logic is here
 impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
     fn get_randoms(&mut self, bytes_key_size: usize, quantification: u8, random: &mut Random) -> Result<(), ()> {
         let reply = syscall!(self.trussed.random_bytes(bytes_key_size)); // TRNG
         let raw_random = &reply.bytes[..bytes_key_size];
         
+        // We restrict each float of the random in the correct interval
         for chunk in raw_random.chunks_exact(size_of::<u32>()) {
             let mut bits = u32::from_ne_bytes(chunk.try_into().unwrap());
         
@@ -103,6 +109,7 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
         Ok(())
     }
 
+    // Nitrokey 3A doesn't have a Machine Key usable like Secure-IC, so we generate one
     fn get_muk(&mut self) -> Result<Message, ()> {
         // muk exists ?
         let muk_path: PathBuf = "skyld_muk".try_into().map_err(|_| ())?;
@@ -110,7 +117,7 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
         let muk_bytes = if let Ok(reply) = try_syscall!(self.trussed.read_file(Location::Internal, muk_path.clone())) {
             reply.data
         } else {
-            let new_muk = syscall!(self.trussed.random_bytes(32)).bytes;
+            let new_muk = syscall!(self.trussed.random_bytes(AES_256_SIZE)).bytes;
 
             syscall!(self.trussed.write_file(
                 Location::Internal,
@@ -147,7 +154,6 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
             StorageAttributes::new().set_persistence(Location::Volatile),
         )).key;
 
-        // 5. On nettoie la clé de base
         syscall!(self.trussed.delete(base_key_id));
 
         Ok(derived_key_id)
@@ -172,6 +178,8 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
             Some(nonce),
         ));
 
+        syscall!(self.trussed.delete(aes_key_id));
+
         self.buff_reply.clear();
         self.buff_reply.extend_from_slice(nonce_bytes).map_err(|_| ())?;
         self.buff_reply.extend_from_slice(&enc_reply.ciphertext).map_err(|_| ())?;
@@ -184,17 +192,14 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
         let aes_key_id = self.derive_aes_256_gcm_from_hash(hash_kdf)?;
 
         // Decrypt key
-        // 1. Découpage du Nonce et du Chiffré + Tag
         let nonce = &wrapped_activation_key[..AES_GCM_NONCE_LEN];
         let tag_start = wrapped_activation_key.len() - AES_GCM_TAG_LEN;
         let ciphertext = &wrapped_activation_key[AES_GCM_NONCE_LEN..tag_start];
         let tag = &wrapped_activation_key[tag_start..];
 
-        // 2. Chargement dans un Message Trussed
         let mut msg = Message::new();
         msg.extend_from_slice(ciphertext).map_err(|_| ())?;
 
-        // 3. Appel de déchiffrement authentifié
         let dec_reply = syscall!(self.trussed.decrypt(
             Mechanism::Aes256Gcm,
             aes_key_id,
@@ -204,9 +209,13 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
             tag,
         ));
 
+        syscall!(self.trussed.delete(aes_key_id));
+
         let plaintext = dec_reply.plaintext.ok_or(())?;
         let mut plaintext_bytes = Vec::new();
-        plaintext_bytes.extend_from_slice(&plaintext).map_err(|_| ())?; // Vérification automatique du non-débordement
+        plaintext_bytes.extend_from_slice(&plaintext).map_err(|_| ())?;
+        // TEST : to see if data is correctly unwrapped
+        //plaintext_bytes.extend_from_slice(&wrapped_activation_key).map_err(|_| ())?;
 
         self.buff_reply.clear();
 
@@ -236,10 +245,8 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
         let activation_key_iter = activation_key.chunks_exact(F32_SIZE);
         let random_iter = random.chunks_exact(quantification_size);
 
-        //let mut i_usbip = 0;
+        // We apply the derive on each float of the activation key
         for (activation_key_element, random_element) in activation_key_iter.zip(random_iter) {
-            //if i_usbip == 13 { break; } // Because USB/IP crashes above, remove when using with true Nitrokey 3
-            //i_usbip += 1;
             let activation_key = f32::from_ne_bytes(activation_key_element.try_into().unwrap());
 
             let val_random = match quantification {
@@ -262,26 +269,32 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
     }
 }
 
-// 1. Déclaration de l'AID
+// AID declaration
 impl<C> AidApp for SkyldApp<C> {
     fn aid(&self) -> Aid {
         Self::AID
     }
 }
 
-// 2. Trait ISO7816 / APDU App
+// Trait ISO7816 / APDU App
 impl<C: CryptoClient + FilesystemClient> ApduApp for SkyldApp<C> {
-    // Appelée automatiquement lors de la sélection, pas besoin de faire quelque chose
+    // Automatically called at start and if client select another application
     fn select(
         &mut self,
         _interface: Interface,
         _apdu: CommandView<'_>,
         _reply: &mut VecView<u8>,
     ) -> Result<(), Status> {
+        self.protected_models.clear();
+        self.buff_reply.clear();
+
         Ok(())
     }
 
-    fn deselect(&mut self) {}
+    fn deselect(&mut self) {
+        self.protected_models.clear();
+        self.buff_reply.clear();
+    }
 
     fn call(
         &mut self,
@@ -292,8 +305,7 @@ impl<C: CryptoClient + FilesystemClient> ApduApp for SkyldApp<C> {
         let ins: u8 = command.instruction().into();
 
         match ins {
-            // INS 0x01 : Wrap activation key
-            0x01 => {
+            COMMAND_WRAP => {
                 let data = command.data();
 
                 let hash_kdf: &[u8; SHA256_LEN] = data[..SHA256_LEN].try_into().unwrap();
@@ -310,8 +322,7 @@ impl<C: CryptoClient + FilesystemClient> ApduApp for SkyldApp<C> {
 
                 Ok(())
             }
-            // INS 0x02 : Unwrap activation key
-            0x02 => {
+            COMMAND_UNWRAP => {
                 let float_mode: u8 = command.p1;
                 let is_key: u8 = command.p2;
                 let data = command.data();
@@ -324,8 +335,7 @@ impl<C: CryptoClient + FilesystemClient> ApduApp for SkyldApp<C> {
 
                 Ok(())
             }
-            // INS 0x03 : Dérivation de clé
-            0x03 => {
+            COMMAND_DERIVE => {
                 // reply.capacity() = 7 609, donc 7 607 octets libres
                 let protected_model_index = command.p1 as usize;
 
