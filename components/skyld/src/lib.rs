@@ -13,7 +13,7 @@ use iso7816::aid::App as AidApp;
 use iso7816::{command::CommandView, Aid, Status};
 use trussed_core::syscall;
 use trussed_core::try_syscall;
-use trussed_core::types::{KeyId, Mechanism, Location, KeySerialization, Message, ShortData, PathBuf, SignatureSerialization, MediumData, StorageAttributes};
+use trussed_core::types::{KeyId, Mechanism, Location, Message, ShortData, PathBuf, MediumData, StorageAttributes};
 use trussed_core::CryptoClient;
 use trussed_core::FilesystemClient;
 
@@ -321,6 +321,7 @@ impl<C: CryptoClient + FilesystemClient> ApduApp for SkyldApp<C> {
 
                 self.unwrap_data(hash_kdf, data_without_hash, float_mode, is_key)
                     .map_err(|_| Status::UnspecifiedCheckingError)?;
+
                 Ok(())
             }
             // INS 0x03 : Dérivation de clé

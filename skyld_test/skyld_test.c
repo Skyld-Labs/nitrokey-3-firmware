@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include "gift128.h"
+#include "sha256.h"
 
 #define QUANTIFICATION_FLOAT16 0
 #define QUANTIFICATION_FLOAT32 1
@@ -185,20 +186,27 @@ void convertCofbToAES(const char *filename) {
     }
 
     // Call WRAP on Nitrokey 3
-    BYTE wrap_apdu[5 + PAYLOAD_LEN + 1];
-    wrap_apdu[0] = 0x00;
+    // 4 octets Header + 3 octets Lc + Payload + 2 octets Le
+    BYTE wrap_apdu[4 + 3 + PAYLOAD_LEN + 2];
+    
+    // Header
+    wrap_apdu[0] = 0x00; // CLA
     wrap_apdu[1] = 0x01; // INS 0x01 = WRAP
-    wrap_apdu[2] = 0x00;
-    wrap_apdu[3] = 0x00;
-    wrap_apdu[4] = PAYLOAD_LEN;
+    wrap_apdu[2] = 0x00; // P1
+    wrap_apdu[3] = 0x00; // P2
 
-    // 1. Les 32 premiers octets : le hash
-    memset(&wrap_apdu[5], 0xBB, HASH_LEN); // TODO  : replace with SAH256 derived from masterKey
+    // Lc étendu : 0x00 suivi de la taille sur 16 bits
+    wrap_apdu[4] = 0x00;
+    wrap_apdu[5] = (PAYLOAD_LEN >> 8) & 0xFF; // Poids fort
+    wrap_apdu[6] = PAYLOAD_LEN & 0xFF;        // Poids faible
 
-    // 2. De l'octet 32 jusqu'à la fin : la seed
-    memcpy(&wrap_apdu[5 + HASH_LEN], plaintext, KEY_LEN);
+    // Payload (Attention, l'offset commence maintenant à 7)
+    sk_sha256(masterKey, sizeof(masterKey), &wrap_apdu[7]);
+    memcpy(&wrap_apdu[7 + HASH_LEN], plaintext, KEY_LEN);
 
-    wrap_apdu[5 + PAYLOAD_LEN] = 0x00; // Tell to receive data
+    // Le étendu : 0x00 0x00 (indique qu'on accepte une réponse de n'importe quelle taille jusqu'à 65536)
+    wrap_apdu[7 + PAYLOAD_LEN] = 0x00;
+    wrap_apdu[7 + PAYLOAD_LEN + 1] = 0x00;
 
     recv_len = sizeof(recv_buf);
     res = SCardTransmit(card, getIOSend_NK3(), wrap_apdu, sizeof(wrap_apdu), NULL, recv_buf, &recv_len);
@@ -251,20 +259,30 @@ void provide_NK3() {
 
 int load_KN3() {
     // 5. Commande 2: INS 0x02 (Unwrap Seed)
-    // CLA=00, INS=01, P1=QUANTIFICATION_FLOAT32, P2=00, Lc=20 (32 octets de test), Data...
+    // Header (4) + Lc_marker (1) + Lc_len (2) + Payload + Le (2)
+    BYTE unwrap_apdu[4 + 3 + PAYLOAD_LEN + 2];
 
-    BYTE unwrap_apdu[5 + PAYLOAD_LEN];
-    unwrap_apdu[0] = 0x00;
-    unwrap_apdu[1] = 0x02;
-    unwrap_apdu[2] = QUANTIFICATION_FLOAT32;
-    unwrap_apdu[3] = 0x01; // 1 = it's a key, 0 other (mainly skrpl)
-    unwrap_apdu[4] = PAYLOAD_LEN;
+    // Header
+    unwrap_apdu[0] = 0x00;                   // CLA
+    unwrap_apdu[1] = 0x02;                   // INS 0x02 = UNWRAP
+    unwrap_apdu[2] = QUANTIFICATION_FLOAT32; // P1
+    unwrap_apdu[3] = 0x01;                   // P2 (is_key, 1 = key)
 
+    // Lc étendu : marqueur 0x00 suivi de la longueur sur 16 bits (gros-boutien)
+    unwrap_apdu[4] = 0x00;
+    unwrap_apdu[5] = (PAYLOAD_LEN >> 8) & 0xFF;
+    unwrap_apdu[6] = PAYLOAD_LEN & 0xFF;
+
+    // Payload : commence à l'offset 7
     // 1. Les 32 premiers octets : le hash
-    memset(&unwrap_apdu[5], 0xBB, HASH_LEN);
+    memset(&unwrap_apdu[7], 0xBB, HASH_LEN);
 
-    // 2. De l'octet 32 jusqu'à la fin : la seed
-    memset(&unwrap_apdu[5 + HASH_LEN], 0xAA, KEY_LEN);
+    // 2. La suite : la seed / payload
+    memset(&unwrap_apdu[7 + HASH_LEN], 0xAA, KEY_LEN);
+
+    // Le étendu : 0x00 0x00 pour autoriser jusqu'à 65 536 octets en retour
+    unwrap_apdu[7 + PAYLOAD_LEN] = 0x00;
+    unwrap_apdu[7 + PAYLOAD_LEN + 1] = 0x00;
 
     recv_len = sizeof(recv_buf);
     res = SCardTransmit(card, getIOSend_NK3(), unwrap_apdu, sizeof(unwrap_apdu), NULL, recv_buf, &recv_len);
@@ -275,8 +293,16 @@ int load_KN3() {
 
 void deriveSessionKey_NK3() {
     // 6. Commande 3: INS 0x03 (Derive Key)
-    // CLA=00, INS=02, P1=00, P2=00, Lc=04 (paramètres), Data={1, 2, 3, 4}, Le=00
-    BYTE derive_apdu[] = {0x00, 0x03, 0x00, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04, 0x00}; // P1 à 0 pour l'indice 0
+    // CLA(1) + INS(1) + P1(1) + P2(1) + 0x00(1) + Le(2) = 7 octets
+    BYTE derive_apdu[] = {
+        0x00,       // CLA
+        0x03,       // INS
+        0x00,       // P1 (ton indice ou paramètre)
+        0x00,       // P2
+        0x00,       // Marqueur signalant l'absence de Lc et la présence d'un Le étendu
+        0x00, 0x00  // Le étendu (0x0000 = jusqu'à 65 536 octets attendus)
+    };
+
     recv_len = sizeof(recv_buf);
     res = SCardTransmit(card, getIOSend_NK3(), derive_apdu, sizeof(derive_apdu), NULL, recv_buf, &recv_len);
     print_hex("Réponse DERIVE", recv_buf, recv_len);
@@ -309,11 +335,9 @@ int main(int argc, char *argv[]) {
     }
 
     init_NK3();
-
     provide_NK3();
 
     //load_KN3();
-
     //deriveSessionKey_NK3();
 
     clear_NK3();
