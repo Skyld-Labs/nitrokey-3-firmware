@@ -21,6 +21,7 @@ usbd-ctaphid = { workspace = true, optional = true }
 utils = { path = "../utils" }
 if_chain = "1.0.2"
 littlefs2-core = "0.1"
+skyld = { path = "../skyld", optional = true }
 
 # Backends
 trussed-auth-backend = { version = "0.2", optional = true }
@@ -53,7 +54,7 @@ hex = "0.4"
 
 [features]
 # nk3
-nk3 = ["fido-authenticator", "ndef-app", "secrets-app", "opcard", "piv-authenticator", "factory-reset"]
+nk3 = ["fido-authenticator", "ndef-app", "secrets-app", "opcard", "piv-authenticator", "factory-reset", "skyld-app"]
 nk3-test = ["nk3"]
 nk3-provisioner = ["nk3", "provisioner-app"]
 
@@ -62,6 +63,7 @@ nkpk = ["fido-authenticator", "factory-reset"]
 nkpk-provisioner = ["nkpk", "provisioner-app"]
 
 # apps
+skyld-app = ["dep:skyld", "trussed/aes256-gcm"]
 secrets-app = ["dep:secrets-app", "backend-auth", "trussed/chacha8-poly1305", "trussed/hmac-sha1", "trussed/hmac-sha256", "trussed/sha256"]
 fido-authenticator = ["dep:fido-authenticator", "usbd-ctaphid", "trussed/aes256-cbc", "trussed/certificate-client", "trussed/chacha8-poly1305", "trussed/ed255", "trussed/hmac-sha256", "trussed/p256", "trussed/sha256"]
 opcard = ["dep:opcard", "backend-rsa", "backend-auth", "trussed/aes256-cbc", "trussed/chacha8-poly1305", "trussed/ed255", "trussed/p256", "trussed/shared-secret", "trussed/x255"]

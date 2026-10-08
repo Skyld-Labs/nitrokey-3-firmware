@@ -367,6 +367,10 @@ type PivApp<R> = piv_authenticator::Authenticator<Client<R>>;
 #[cfg(feature = "provisioner-app")]
 type ProvisionerApp<R> = provisioner_app::Provisioner<<R as Runner>::Store, Client<R>>;
 
+// DÉCLARATION DU TYPE POUR SKYLD
+#[cfg(feature = "skyld-app")]
+type MySkyldApp<R> = skyld::SkyldApp<Client<R>>;
+
 #[repr(u8)]
 pub enum CustomStatus {
     ReverseHotpSuccess = 0,
@@ -408,6 +412,8 @@ pub struct Apps<R: Runner> {
     piv: Option<PivApp<R>>,
     #[cfg(feature = "provisioner-app")]
     provisioner: ProvisionerApp<R>,
+    #[cfg(feature = "skyld-app")]
+    skyld: Option<MySkyldApp<R>>,
 }
 
 const CLIENT_COUNT: usize = const {
@@ -418,6 +424,7 @@ const CLIENT_COUNT: usize = const {
         cfg!(feature = "piv-authenticator"),
         cfg!(feature = "provisioner-app"),
         cfg!(feature = "secrets-app"),
+        cfg!(feature = "skyld-app"),
     ];
 
     let mut n = 0;
@@ -579,6 +586,10 @@ impl<R: Runner> Apps<R> {
         #[cfg(feature = "provisioner-app")]
         let provisioner = App::new(runner, client_builder, provisioner, &());
 
+        #[cfg(feature = "skyld-app")]
+        let skyld = (!is_nfc_powered && migrated_successfully)
+            .then(|| App::new(runner, client_builder, (), &()));
+
         Self {
             #[cfg(feature = "fido-authenticator")]
             fido,
@@ -592,6 +603,8 @@ impl<R: Runner> Apps<R> {
             piv,
             #[cfg(feature = "provisioner-app")]
             provisioner,
+            #[cfg(feature = "skyld-app")]
+            skyld,
             admin,
         }
     }
@@ -715,7 +728,7 @@ impl<R: Runner> Apps<R> {
     where
         F: FnOnce(&mut [&mut dyn ApduApp]) -> T,
     {
-        let mut apps: Vec<&mut dyn ApduApp, 7> = Default::default();
+        let mut apps: Vec<&mut dyn ApduApp, 8> = Default::default();
 
         // App 1: ndef
         #[cfg(feature = "ndef-app")]
@@ -751,6 +764,12 @@ impl<R: Runner> Apps<R> {
         // App 7: provisioner
         #[cfg(feature = "provisioner-app")]
         apps.push(&mut self.provisioner).ok().unwrap();
+
+        // App 8: skyld
+        #[cfg(feature = "skyld-app")]
+        if let Some(skyld) = self.skyld.as_mut() {
+            apps.push(skyld).ok().unwrap();
+        }
 
         f(&mut apps)
     }
@@ -846,6 +865,28 @@ trait App<R: Runner>: Sized {
 
     fn interrupt() -> Option<&'static InterruptFlag> {
         None
+    }
+}
+
+// IMPLÉMENTATION DU TRAIT POUR SKYLD
+#[cfg(feature = "skyld-app")]
+impl<R: Runner> App<R> for MySkyldApp<R> {
+    const CLIENT_ID: &'static Path = path!("skyld");
+    type Data = ();
+    type Config = ();
+
+    fn with_client(_runner: &R, trussed: Client<R>, _: (), _: &()) -> Self {
+        skyld::SkyldApp::new(trussed)
+    }
+
+    fn channel() -> &'static TrussedChannel {
+        static CHANNEL: TrussedChannel = TrussedChannel::new();
+        &CHANNEL
+    }
+
+    fn interrupt() -> Option<&'static InterruptFlag> {
+        static INTERRUPT: InterruptFlag = InterruptFlag::new();
+        Some(&INTERRUPT)
     }
 }
 

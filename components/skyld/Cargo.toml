@@ -1,0 +1,14 @@
+[package]
+name = "skyld"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+apdu-app = "0.2"
+heapless = "0.9"
+iso7816 = "0.2"
+littlefs2-core = "0.1"
+trussed = { workspace = true, features = ["crypto-client"] }
+trussed-core.workspace = true
+half = { version = "2.4", default-features = false }
+libm = "0.2"

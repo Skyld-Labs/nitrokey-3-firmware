@@ -29,3 +29,4 @@ utils = { path = "../../components/utils", features = ["build"] }
 test = ["apps/nk3-test"]
 provisioner = ["apps/nk3-provisioner"]
 ccid = ["apps/trussed-usbip-ccid", "trussed-usbip/ccid"]
+skyld-app = ["apps/skyld-app"]
