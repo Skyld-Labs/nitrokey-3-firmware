@@ -224,6 +224,8 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
             let mut random = Random::new();
             self.get_randoms(plaintext_bytes.len(), quantification, &mut random)?;
 
+            self.buff_reply.extend_from_slice(&random).map_err(|_| ())?;
+
             // Finalize protectedModel
             let protected_model = ProtectedModels { activation_key: plaintext_bytes, random, quantification };
             self.protected_models.push(protected_model).map_err(|_| ())?;
@@ -331,6 +333,12 @@ impl<C: CryptoClient + FilesystemClient> ApduApp for SkyldApp<C> {
                 let data_without_hash: &[u8] = data[SHA256_LEN..].try_into().unwrap();
 
                 self.unwrap_data(hash_kdf, data_without_hash, float_mode, is_key)
+                    .map_err(|_| Status::UnspecifiedCheckingError)?;
+
+                // TODO : deal greater sizes
+                let chunk_size = core::cmp::min(reply.capacity(), self.buff_reply.len());
+
+                reply.extend_from_slice(&self.buff_reply[..chunk_size])
                     .map_err(|_| Status::UnspecifiedCheckingError)?;
 
                 Ok(())
