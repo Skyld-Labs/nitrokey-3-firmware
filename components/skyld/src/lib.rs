@@ -32,8 +32,13 @@ const COMMAND_DERIVE: u8 = 0x03;
 const F32_SIZE: usize = size_of::<f32>();
 const F16_SIZE: usize = size_of::<half::f16>();
 
-const QUANTIFICATION_FLOAT16: u8 = 0;
-const _QUANTIFICATION_FLOAT32: u8 = 1;
+const QUANTIFICATION_MODEL_FP16: u8 = 0x00;
+const QUANTIFICATION_MODEL_FP32: u8 = 0x01;
+const QUANTIFICATION_MEV_FP16: u8 = 0x10;
+const QUANTIFICATION_MEV_FP32: u8 = 0x00;
+
+const QUANTIFICATION_MODEL_SELECTOR: u8 = 0b1;
+const QUANTIFICATION_MEV_SELECTOR: u8 = 0b10;
 
 type SkyldKey = Vec<u8, MAX_KEY_LEN>;
 type Random = Vec<u8, MAX_KEY_LEN>;
@@ -65,7 +70,7 @@ impl<C> SkyldApp<C> {
 
 // Logic is here
 impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
-    fn get_randoms(&mut self, bytes_key_size: usize, quantification: u8, random: &mut Random) -> Result<(), ()> {
+    fn get_randoms(&mut self, bytes_key_size: usize, quantification_random: u8, random: &mut Random) -> Result<(), ()> {
         let reply = syscall!(self.trussed.random_bytes(bytes_key_size)); // TRNG
         let raw_random = &reply.bytes[..bytes_key_size];
         
@@ -73,8 +78,8 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
         for chunk in raw_random.chunks_exact(size_of::<u32>()) {
             let mut bits = u32::from_ne_bytes(chunk.try_into().unwrap());
         
-            match quantification {
-                QUANTIFICATION_FLOAT16 => {
+            match quantification_random {
+                QUANTIFICATION_MODEL_FP16 => {
                     let index = bits % 16;
                     let exponent = (index as i32) - 6;
                     
@@ -222,7 +227,7 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
         if is_key == 1 {
             // Get random
             let mut random = Random::new();
-            self.get_randoms(plaintext_bytes.len(), quantification, &mut random)?;
+            self.get_randoms(plaintext_bytes.len(), quantification & QUANTIFICATION_MODEL_SELECTOR, &mut random)?;
 
             self.buff_reply.extend_from_slice(&random).map_err(|_| ())?;
 
@@ -239,32 +244,59 @@ impl<C: CryptoClient + FilesystemClient> SkyldApp<C> {
     fn derive_key(activation_key: &[u8], random: &[u8], quantification: u8, out: &mut SkyldKey) -> Result<(), ()> {
         out.clear();
 
-        let quantification_size = match quantification {
-            QUANTIFICATION_FLOAT16 => F16_SIZE,
+        let random_quantification_size = match quantification & QUANTIFICATION_MODEL_SELECTOR {
+            0b0 => F16_SIZE,
             _ => F32_SIZE,
         };
 
-        let activation_key_iter = activation_key.chunks_exact(F32_SIZE);
-        let random_iter = random.chunks_exact(quantification_size);
+        let key_quantification_size = match quantification & QUANTIFICATION_MEV_SELECTOR {
+            0b0 => F32_SIZE,
+            _ => F16_SIZE,
+        };
+
+        let mev_quantification = quantification & QUANTIFICATION_MEV_SELECTOR;
+        let model_quantification = quantification & QUANTIFICATION_MODEL_SELECTOR;
+
+        let activation_key_iter = activation_key.chunks_exact(key_quantification_size);
+        let random_iter = random.chunks_exact(random_quantification_size);
 
         // We apply the derive on each float of the activation key
         for (activation_key_element, random_element) in activation_key_iter.zip(random_iter) {
-            let activation_key = f32::from_ne_bytes(activation_key_element.try_into().unwrap());
-
-            let val_random = match quantification {
-                QUANTIFICATION_FLOAT16 => {
+            match (mev_quantification, model_quantification) {
+                (QUANTIFICATION_MEV_FP32, QUANTIFICATION_MODEL_FP16) => {
+                    let activation_key = f32::from_ne_bytes(activation_key_element.try_into().unwrap());
+                
                     let bytes: [u8; F16_SIZE] = random_element.try_into().unwrap();
-                    f16::from_bits(u16::from_ne_bytes(bytes)).to_f32()
+                    let val_random = f16::from_bits(u16::from_ne_bytes(bytes)).to_f32();
+
+                    let resultat = activation_key / val_random;
+                    out.extend_from_slice(&resultat.to_ne_bytes())
+                        .map_err(|_| ())?;
                 },
-                _ => {
+
+                (QUANTIFICATION_MEV_FP32, QUANTIFICATION_MODEL_FP32) => {
+                    let activation_key = f32::from_ne_bytes(activation_key_element.try_into().unwrap());
+                
                     let bytes: [u8; F32_SIZE] = random_element.try_into().unwrap();
-                    f32::from_ne_bytes(bytes)
+                    let val_random = f32::from_ne_bytes(bytes);
+
+                    let resultat = activation_key / val_random;
+                    out.extend_from_slice(&resultat.to_ne_bytes())
+                        .map_err(|_| ())?;
                 },
-            };
-        
-            let resultat = activation_key / val_random;
-            out.extend_from_slice(&resultat.to_ne_bytes())
-                .map_err(|_| ())?;
+
+                (QUANTIFICATION_MEV_FP16, QUANTIFICATION_MODEL_FP16) => {
+                    let activation_key = f16::from_ne_bytes(activation_key_element.try_into().unwrap());
+                
+                    let bytes: [u8; F16_SIZE] = random_element.try_into().unwrap();
+                    let val_random = f16::from_bits(u16::from_ne_bytes(bytes));
+
+                    let resultat = activation_key / val_random;
+                    out.extend_from_slice(&resultat.to_ne_bytes())
+                        .map_err(|_| ())?;
+                },
+                _ => return Err(()), // Unsupported quantification
+            }
         }
 
         Ok(())
